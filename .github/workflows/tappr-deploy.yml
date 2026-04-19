@@ -1,0 +1,45 @@
+name: Deploy with Tappr approval
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: echo "pretending to build $GITHUB_SHA"
+
+      - name: Wait for human approval via WhatsApp
+        env:
+          TAPPR_KEY: ${{ secrets.TAPPR_API_KEY }}
+          TAPPR_URL: ${{ secrets.TAPPR_BASE_URL }}
+        run: |
+          set -e
+          RESP=$(curl -sS -X POST "$TAPPR_URL/v1/check" \
+            -H "Authorization: Bearer $TAPPR_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"action\": \"deploy.production\",
+              \"params\": {
+                \"service\": \"payments-api\",
+                \"commit\": \"$GITHUB_SHA\",
+                \"actor\": \"$GITHUB_ACTOR\",
+                \"workflow\": \"$GITHUB_WORKFLOW\"
+              },
+              \"timeout_sec\": 600
+            }")
+          echo "Tappr response: $RESP"
+          STATE=$(echo "$RESP" | jq -r '.state')
+          if [ "$STATE" != "APPROVED" ]; then
+            echo "::error::Deploy blocked: state=$STATE"
+            exit 1
+          fi
+          echo "::notice::Approved by $(echo "$RESP" | jq -r '.responded_by.name')"
+
+      - name: Deploy
+        run: echo "pretending to deploy $GITHUB_SHA"
