@@ -1,4 +1,19 @@
-name: Deploy with Tappr approval
+# .github/workflows/tappr-gate.yml
+# Drop this file into YOUR test repo (amit5115/test) to add a Tappr
+# approval gate before any "production" deploy step.
+#
+# How it works:
+#   1. The "request-approval" job calls POST /v1/check and blocks (long-poll)
+#      until a human replies 1 (approve) or 2 (deny) on WhatsApp/Slack/email.
+#   2. Only if approved does the "deploy" job run.
+#   3. Timeout (default 15 min) → the deploy step is skipped.
+#
+# Setup:
+#   In your test repo → Settings → Secrets and variables → Actions → New secret:
+#     TAPPR_API_KEY  = your tpr_live_… key from http://localhost:3000/dashboard/api-keys
+#     TAPPR_BASE_URL = https://<your-tunnel>.trycloudflare.com   (or production URL)
+
+name: Deploy with Tappr Approval Gate
 
 on:
   push:
@@ -6,40 +21,71 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  request-approval:
+    name: 🔐 Request Tappr approval
     runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.tappr.outputs.approved }}
+      request_id: ${{ steps.tappr.outputs.request_id }}
+
+    steps:
+      - name: Ask Tappr for human approval
+        id: tappr
+        env:
+          TAPPR_API_KEY: ${{ secrets.TAPPR_API_KEY }}
+          TAPPR_BASE_URL: ${{ secrets.TAPPR_BASE_URL }}
+        run: |
+          echo "🕐 Sending approval request to Tappr..."
+
+          RESPONSE=$(curl -sf \
+            --max-time 960 \
+            -X POST "$TAPPR_BASE_URL/v1/check" \
+            -H "Authorization: Bearer $TAPPR_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "action": "deploy.production",
+              "params": {
+                "repo":    "${{ github.repository }}",
+                "branch":  "${{ github.ref_name }}",
+                "commit":  "${{ github.sha }}",
+                "actor":   "${{ github.actor }}",
+                "run_id":  "${{ github.run_id }}"
+              },
+              "timeout_sec": 900
+            }')
+
+          echo "Tappr response: $RESPONSE"
+
+          STATE=$(echo "$RESPONSE" | jq -r '.state // "UNKNOWN"')
+          REQUEST_ID=$(echo "$RESPONSE" | jq -r '.request_id // ""')
+
+          echo "approved=$( [ "$STATE" = "APPROVED" ] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "request_id=$REQUEST_ID" >> $GITHUB_OUTPUT
+
+          if [ "$STATE" = "APPROVED" ]; then
+            echo "✅ Approved! Proceeding to deploy."
+          elif [ "$STATE" = "TIMEOUT" ]; then
+            echo "⏱️ Approval timed out. Deploy skipped."
+            exit 1
+          else
+            echo "❌ Denied (state=$STATE). Deploy blocked."
+            exit 1
+          fi
+
+  deploy:
+    name: 🚀 Deploy to production
+    needs: request-approval
+    if: needs.request-approval.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
-        run: echo "pretending to build $GITHUB_SHA"
-
-      - name: Wait for human approval via WhatsApp
-        env:
-          TAPPR_KEY: ${{ secrets.TAPPR_API_KEY }}
-          TAPPR_URL: ${{ secrets.TAPPR_BASE_URL }}
+      - name: Simulate deploy
         run: |
-          set -e
-          RESP=$(curl -sS -X POST "$TAPPR_URL/v1/check" \
-            -H "Authorization: Bearer $TAPPR_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"action\": \"deploy.production\",
-              \"params\": {
-                \"service\": \"payments-api\",
-                \"commit\": \"$GITHUB_SHA\",
-                \"actor\": \"$GITHUB_ACTOR\",
-                \"workflow\": \"$GITHUB_WORKFLOW\"
-              },
-              \"timeout_sec\": 600
-            }")
-          echo "Tappr response: $RESP"
-          STATE=$(echo "$RESP" | jq -r '.state')
-          if [ "$STATE" != "APPROVED" ]; then
-            echo "::error::Deploy blocked: state=$STATE"
-            exit 1
-          fi
-          echo "::notice::Approved by $(echo "$RESP" | jq -r '.responded_by.name')"
-
-      - name: Deploy
-        run: echo "pretending to deploy $GITHUB_SHA"
+          echo "🚀 Deploying commit ${{ github.sha }} to production..."
+          echo "Approved via Tappr request ${{ needs.request-approval.outputs.request_id }}"
+          # Replace this with your real deploy command:
+          # e.g. kubectl apply, helm upgrade, fly deploy, etc.
+          sleep 2
+          echo "✅ Deploy complete!"
